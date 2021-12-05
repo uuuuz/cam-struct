@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -27,9 +26,6 @@ func (s Depends) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s Depends) Less(i, j int) bool { return s[i] < s[j] }
 
 func main() {
-	// 生成树状结构
-	http.HandleFunc("/dep", getTree)
-
 	// 需要安装 brew install graphviz
 	http.HandleFunc("/all", getRelation)
 
@@ -38,44 +34,6 @@ func main() {
 	if err := http.ListenAndServe(":3001", nil); err != nil {
 		fmt.Println(err.Error())
 	}
-}
-
-func getTree(writer http.ResponseWriter, request *http.Request) {
-	writer.Header().Set("Access-Control-Allow-Origin", "*")                // 跨域
-	writer.Header().Set("Content-type", "application/json; charset=utf-8") // 返回json
-
-	pkgs, data, err := getDepends()
-	if err != nil {
-		fmt.Println(err.Error())
-		writer.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	// 树状结构
-	root := &Node{Name: "back", Children: make([]*Node, len(pkgs))}
-	for i := range pkgs {
-		v := data[pkgs[i]]
-		child := &Node{Name: pkgs[i], Children: []*Node{}}
-		for n := range v {
-			leaf := &Node{Name: v[n]}
-			child.Children = append(child.Children, leaf)
-		}
-		root.Children[i] = child
-	}
-	res, err := json.Marshal(root)
-	if err != nil {
-		fmt.Println(err.Error())
-		writer.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	//fmt.Println(string(res))
-	// 关系图
-	// res, _ := getResultData(pkgs, data)
-	if _, err := writer.Write(res); err != nil {
-		fmt.Println(err.Error())
-		writer.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	writer.WriteHeader(http.StatusOK)
 }
 
 func getRelation(writer http.ResponseWriter, request *http.Request) {
@@ -98,7 +56,7 @@ func getRelation(writer http.ResponseWriter, request *http.Request) {
 			continue
 		}
 		buf.WriteString("digraph G {\n")
-		combineByFloor(buf, k, map[string]struct{}{}, map[string]struct{}{}, data)
+		combineByFloor(buf, k, map[string]struct{}{}, data)
 		buf.WriteString("}")
 		break
 	}
@@ -165,17 +123,30 @@ func simpleCombine(buf *bytes.Buffer, rootK string, source map[string][]string) 
 		routes = filterDepend(routes)
 	}
 	// 绘制依赖关系 - 去掉重复的依赖关系
-	relation := make(map[string]struct{})
+	relationMap := make(map[string]struct{})
+	label := make(map[string]struct{})
 	var next = []*node{root}
+	var relationSlice []string
 	for {
-		next = draw(buf, next, relation)
+		var relation []string
+		next, relation = draw(next, relationMap, label)
 		if len(next) == 0 {
 			break
 		}
+		if len(relation) > 0 {
+			relationSlice = append(relationSlice, relation...)
+		}
+	}
+	for k := range label {
+		buf.WriteString(k)
+	}
+	for i := range relationSlice {
+		buf.WriteString(relationSlice[i])
 	}
 }
 
 func filterDepend(roots []*node) []*node {
+	var unique = make(map[string]struct{})
 	if roots == nil {
 		return nil
 	}
@@ -192,6 +163,9 @@ func filterDepend(roots []*node) []*node {
 			if reachable(v, routes) {
 				delete(root.child, k)
 			} else {
+				if _, exist := unique[v.name]; exist {
+					continue
+				}
 				next = append(next, v)
 			}
 		}
@@ -211,20 +185,38 @@ func reachable(target *node, routes []*node) bool {
 	return false
 }
 
-func draw(buf *bytes.Buffer, nodes []*node, relation map[string]struct{}) []*node {
+func draw(nodes []*node, relation map[string]struct{}, labels map[string]struct{}) ([]*node, []string) {
 	var next []*node
+	var relationOrderly []string
 	for i := range nodes {
+		name, label := deal(nodes[i].name)
+		if strings.Compare(name, label) != 0 {
+			labels[fmt.Sprintf(`%s[label="%s"]`, name, label)] = struct{}{}
+		}
 		for _, v := range nodes[i].child {
+			n1, l1 := deal(v.name)
+			if strings.Compare(n1, l1) != 0 {
+				labels[fmt.Sprintf(`%s[label="%s"]`, n1, l1)] = struct{}{}
+			}
 			str := fmt.Sprintf("%s -> %s\n", nodes[i].name, v.name)
 			if _, exist := relation[str]; exist {
 				continue
 			}
-			buf.WriteString(str)
+			// buf.WriteString(str)
+			relationOrderly = append(relationOrderly, str)
 			relation[str] = struct{}{}
 			next = append(next, v)
 		}
 	}
-	return next
+	return next, relationOrderly
+}
+
+func deal(name string) (string, string) {
+	label := name
+	if strings.Contains(name, "/") {
+		name = strings.Replace(name, "/", "__", -1)
+	}
+	return name, label
 }
 
 func getDepend(fathers []*node, source map[string][]string, nodePool map[string]*node) []*node {
@@ -245,10 +237,9 @@ func getDepend(fathers []*node, source map[string][]string, nodePool map[string]
 				child = nodePool[children[ii]]
 			}
 			// 是否构成了环
-			if canArrive(father.name, child) {
-				// 若为环，则不构建关系
-				continue
-			}
+			// if canArrive(father.name, child) {
+			//	continue
+			// }
 			// 建立关系
 			child.father[father.name] = father
 			father.child[child.name] = child
@@ -273,13 +264,13 @@ func canArrive(father string, child *node) bool {
 	return false
 }
 
-func combineByFloor(buf *bytes.Buffer, father string, notRef, relation map[string]struct{}, source map[string][]string) {
+func combineByFloor(buf *bytes.Buffer, father string, relation map[string]struct{}, source map[string][]string) {
 	// 逐层生成
 	var floor = []string{father}
 	for {
 		var next []string
 		for i := range floor {
-			next = append(next, combineChild(buf, floor[i], source[floor[i]], notRef, relation)...)
+			next = append(next, combineChild(buf, floor[i], source[floor[i]], relation)...)
 		}
 		if len(next) == 0 {
 			break
@@ -288,19 +279,12 @@ func combineByFloor(buf *bytes.Buffer, father string, notRef, relation map[strin
 	}
 }
 
-func combineChild(buf *bytes.Buffer, father string, child []string, notRef, relation map[string]struct{}) []string {
+func combineChild(buf *bytes.Buffer, father string, child []string, relation map[string]struct{}) []string {
 	if len(child) == 0 {
 		return nil
 	}
 	var next []string
 	for i := range child {
-		// 排除不可引用的
-		if father == child[i] {
-			continue
-		}
-		if _, exist := notRef[child[i]]; exist {
-			continue
-		}
 		str := fmt.Sprintf("%s -> %s\n", father, child[i])
 		if _, exist := relation[str]; exist {
 			continue
@@ -318,7 +302,7 @@ func combineChild(buf *bytes.Buffer, father string, child []string, notRef, rela
 
 func getDepends() ([]string, map[string][]string, error) {
 	// 遍历cam项目，拉取所有的包和依赖
-	path := "/Users/wxm/test/cam/back/"
+	path := "/Users/wxm/test/cam/back/" // 做成参数 todo
 	files, err := ioutil.ReadDir(path)
 	if err != nil {
 		return nil, nil, err
@@ -336,6 +320,7 @@ func getDepends() ([]string, map[string][]string, error) {
 		depends[files[i].Name()] = dep
 		pkgs = append(pkgs, files[i].Name())
 	}
+
 	return pkgs, depends, nil
 }
 
@@ -349,10 +334,11 @@ func readModule(path string) ([]string, error) {
 		fileName := path + "/" + files[i].Name()
 		var dep []string
 		if files[i].IsDir() {
-			dep, err = readModule(fileName)
-			if err != nil {
-				return nil, err
-			}
+			continue // 暂且过滤内部的文件夹
+			//dep, err = readModule(fileName)
+			//if err != nil {
+			//	return nil, err
+			//}
 		} else {
 			data, err := ioutil.ReadFile(fileName)
 			if err != nil {
@@ -379,14 +365,18 @@ func readModule(path string) ([]string, error) {
 	// 去重
 	depMap := make(map[string]struct{})
 	for i := range depends {
-		// depMap[depends[i]] = struct{}{}
-		depMap[strings.Split(depends[i], "/")[0]] = struct{}{}
+		// depMap[depends[i]] = struct{}{} // 取全包含的结构，考虑需要替换的敏感字符
+		if !strings.Contains(depends[i], "/") { // 仅取最外层结构
+			depMap[depends[i]] = struct{}{}
+		}
 	}
 	res := make([]string, 0, len(depMap))
 	for k := range depMap {
 		res = append(res, k)
 	}
-	// 排序 todo
+	// 按照名字排序
 	sort.Sort(Depends(res))
 	return res, nil
 }
+
+//
