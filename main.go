@@ -12,6 +12,8 @@ import (
 
 var reg = regexp.MustCompile(`.*cam/back/.*`) // cam/back/
 
+var rootPath = "/Users/wxm/go/src/cam/back/"
+
 type (
 	Node struct {
 		Name     string  `json:"name"`
@@ -43,7 +45,7 @@ func getRelation(writer http.ResponseWriter, request *http.Request) {
 
 	target := request.FormValue("name")
 
-	_, data, err := getDepends()
+	_, data, err := getDepends(rootPath)
 	if err != nil {
 		fmt.Println(err.Error())
 		writer.WriteHeader(http.StatusInternalServerError)
@@ -74,7 +76,7 @@ func getSimpleRelation(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Content-type", "text/plain") // 返回 file
 	target := request.FormValue("name")
 
-	_, data, err := getDepends()
+	_, data, err := getDepends(rootPath)
 	if err != nil {
 		fmt.Println(err.Error())
 		writer.WriteHeader(http.StatusInternalServerError)
@@ -300,9 +302,9 @@ func combineChild(buf *bytes.Buffer, father string, child []string, relation map
 	return next
 }
 
-func getDepends() ([]string, map[string][]string, error) {
+func getDepends(path string) ([]string, map[string][]string, error) {
 	// 遍历cam项目，拉取所有的包和依赖
-	path := "/Users/wxm/test/cam/back/" // 做成参数 todo
+	// path := "/Users/wxm/test/cam/back/" // 做成参数 todo
 	files, err := ioutil.ReadDir(path)
 	if err != nil {
 		return nil, nil, err
