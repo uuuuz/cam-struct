@@ -10,9 +10,11 @@ import (
 	"strings"
 )
 
-var reg = regexp.MustCompile(`.*cam/back/.*`) // cam/back/
-
-var rootPath = "/Users/wxm/go/src/cam/back/"
+var (
+	reg          = regexp.MustCompile(`.*cam/back/.*`) // cam/back/
+	rootPath     = "/Users/wxm/go/src/cam/back/"
+	rootNodeName = "root_root_root"
+)
 
 type (
 	Node struct {
@@ -29,13 +31,111 @@ func (s Depends) Less(i, j int) bool { return s[i] < s[j] }
 
 func main() {
 	// 需要安装 brew install graphviz
-	http.HandleFunc("/all", getRelation)
+	http.HandleFunc("/single-all", getRelation)
 
-	http.HandleFunc("/simple", getSimpleRelation)
+	http.HandleFunc("/single-simple", getSimpleRelation)
+
+	// 所有的关系
+	http.HandleFunc("/all-all", getAll)
+	http.HandleFunc("/all-simple", getAllSimple)
 
 	if err := http.ListenAndServe(":3001", nil); err != nil {
 		fmt.Println(err.Error())
 	}
+}
+
+func getAll(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Access-Control-Allow-Origin", "*") // 跨域
+	writer.Header().Add("Content-Disposition", "attachment; filename=demo")
+	writer.Header().Set("Content-type", "text/plain") // 返回 file
+	// 扫描全部依赖
+	_, data, err := getDepends(rootPath)
+	if err != nil {
+		fmt.Println(err.Error())
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// 找出所有根结点（不被依赖的所有包）
+	var rootMap []string
+	for k := range data {
+		isDepended := false
+	OVER:
+		for _, vv := range data {
+			for i := range vv {
+				if vv[i] == k {
+					isDepended = true
+					break OVER
+				}
+			}
+		}
+		if !isDepended {
+			rootMap = append(rootMap, k)
+		}
+	}
+	// 当根结点不止1个时，创建一个结点（虚构的，如果可以则不进行创建），依赖这些根节点
+	if len(rootMap) > 0 {
+		data[rootNodeName] = rootMap
+	}
+	// 遍历依赖结构
+	buf := &bytes.Buffer{}
+	buf.WriteString("digraph G {\n")
+	combineByFloor(buf, rootNodeName, map[string]struct{}{}, data)
+	buf.WriteString("}")
+
+	if _, err := writer.Write(buf.Bytes()); err != nil {
+		fmt.Println(err.Error())
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	writer.WriteHeader(http.StatusOK)
+}
+
+func getAllSimple(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Access-Control-Allow-Origin", "*") // 跨域
+	writer.Header().Add("Content-Disposition", "attachment; filename=demo")
+	writer.Header().Set("Content-type", "text/plain") // 返回 file
+
+	_, data, err := getDepends(rootPath)
+	if err != nil {
+		fmt.Println(err.Error())
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// 找出所有根结点（不被依赖的所有包）
+	var rootMap []string
+	for k := range data {
+		isDepended := false
+	OVER:
+		for _, vv := range data {
+			for i := range vv {
+				if vv[i] == k {
+					isDepended = true
+					break OVER
+				}
+			}
+		}
+		if !isDepended {
+			rootMap = append(rootMap, k)
+		}
+	}
+	// 当根结点不止1个时，创建一个结点（虚构的，如果可以则不进行创建），依赖这些根节点
+	if len(rootMap) > 0 {
+		data["root_root_root"] = rootMap
+	}
+
+	// 生成文件
+	buf := &bytes.Buffer{}
+	buf.WriteString("digraph G {\n")
+	simpleCombine(buf, "root_root_root", data)
+	buf.WriteString("}")
+	if _, err := writer.Write(buf.Bytes()); err != nil {
+		fmt.Println(err.Error())
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	writer.WriteHeader(http.StatusOK)
 }
 
 func getRelation(writer http.ResponseWriter, request *http.Request) {
@@ -113,7 +213,7 @@ func simpleCombine(buf *bytes.Buffer, rootK string, source map[string][]string) 
 		name:  rootK,
 		child: make(map[string]*node),
 	}
-	nodePool := map[string]*node{"user": root}
+	nodePool := map[string]*node{rootK: root}
 	// 找出所有依赖关系
 	var fathers = []*node{root}
 	for len(fathers) > 0 {
@@ -291,9 +391,10 @@ func combineChild(buf *bytes.Buffer, father string, child []string, relation map
 		if _, exist := relation[str]; exist {
 			continue
 		}
-		buf.WriteString(str)
+		if strings.Compare(father, rootNodeName) != 0 {
+			buf.WriteString(str)
+		}
 		relation[str] = struct{}{}
-
 		if child[i] == "startup" {
 			continue
 		}
