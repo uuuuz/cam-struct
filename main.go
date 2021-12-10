@@ -30,14 +30,15 @@ func (s Depends) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s Depends) Less(i, j int) bool { return s[i] < s[j] }
 
 func main() {
+	// 默认包名与文件夹名一致 //
 	// 需要安装 brew install graphviz
-	http.HandleFunc("/single-all", getRelation)
+	http.HandleFunc("/all-all", getRelation)
+	http.HandleFunc("/all-simple", getRelationSimple)
+	http.HandleFunc("/single-simple", getSingleRelationSimple)
 
-	http.HandleFunc("/single-simple", getSimpleRelation)
-
-	// 所有的关系
-	http.HandleFunc("/all-all", getAll)
-	http.HandleFunc("/all-simple", getAllSimple)
+	// 最外层的依赖关系
+	http.HandleFunc("/all", getAll)
+	http.HandleFunc("/simple", getAllSimple)
 
 	if err := http.ListenAndServe(":3001", nil); err != nil {
 		fmt.Println(err.Error())
@@ -142,26 +143,41 @@ func getRelation(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Access-Control-Allow-Origin", "*") // 跨域
 	writer.Header().Add("Content-Disposition", "attachment; filename=demo")
 	writer.Header().Set("Content-type", "text/plain") // 返回 file
-
-	target := request.FormValue("name")
-
-	_, data, err := getDepends(rootPath)
+	// 扫描全部依赖
+	data, err := getRelationDepends(rootPath)
 	if err != nil {
 		fmt.Println(err.Error())
 		writer.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	// 生成文件
-	buf := &bytes.Buffer{}
+
+	// 找出所有根结点（不被依赖的所有包）
+	var rootMap []string
 	for k := range data {
-		if k != target {
-			continue
+		isDepended := false
+	OVER:
+		for _, vv := range data {
+			for i := range vv {
+				if vv[i] == k {
+					isDepended = true
+					break OVER
+				}
+			}
 		}
-		buf.WriteString("digraph G {\n")
-		combineByFloor(buf, k, map[string]struct{}{}, data)
-		buf.WriteString("}")
-		break
+		if !isDepended {
+			rootMap = append(rootMap, k)
+		}
 	}
+	// 当根结点不止1个时，创建一个结点（虚构的，如果可以则不进行创建），依赖这些根节点
+	if len(rootMap) > 0 {
+		data[rootNodeName] = rootMap
+	}
+	// 遍历依赖结构
+	buf := &bytes.Buffer{}
+	buf.WriteString("digraph G {\n")
+	combineByFloor(buf, rootNodeName, map[string]struct{}{}, data)
+	buf.WriteString("}")
+
 	if _, err := writer.Write(buf.Bytes()); err != nil {
 		fmt.Println(err.Error())
 		writer.WriteHeader(http.StatusInternalServerError)
@@ -170,34 +186,80 @@ func getRelation(writer http.ResponseWriter, request *http.Request) {
 	writer.WriteHeader(http.StatusOK)
 }
 
-func getSimpleRelation(writer http.ResponseWriter, request *http.Request) {
+func getRelationSimple(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Access-Control-Allow-Origin", "*") // 跨域
 	writer.Header().Add("Content-Disposition", "attachment; filename=demo")
 	writer.Header().Set("Content-type", "text/plain") // 返回 file
-	target := request.FormValue("name")
 
-	_, data, err := getDepends(rootPath)
+	data, err := getRelationDepends(rootPath)
 	if err != nil {
 		fmt.Println(err.Error())
 		writer.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
+	// 找出所有根结点（不被依赖的所有包）
+	var rootMap []string
+	for k := range data {
+		isDepended := false
+	OVER:
+		for _, vv := range data {
+			for i := range vv {
+				if vv[i] == k {
+					isDepended = true
+					break OVER
+				}
+			}
+		}
+		if !isDepended {
+			rootMap = append(rootMap, k)
+		}
+	}
+	// 当根结点不止1个时，创建一个结点（虚构的，如果可以则不进行创建），依赖这些根节点
+	if len(rootMap) > 0 {
+		data["root_root_root"] = rootMap
+	}
+
 	// 生成文件
 	buf := &bytes.Buffer{}
-	for k := range data {
-		if k != target {
-			continue
-		}
-		buf.WriteString("digraph G {\n")
-		simpleCombine(buf, k, data)
-		buf.WriteString("}")
-		break
-	}
+	buf.WriteString("digraph G {\n")
+	simpleCombine(buf, "root_root_root", data)
+	buf.WriteString("}")
 	if _, err := writer.Write(buf.Bytes()); err != nil {
 		fmt.Println(err.Error())
 		writer.WriteHeader(http.StatusInternalServerError)
 		return
+	}
+	writer.WriteHeader(http.StatusOK)
+}
+
+func getSingleRelationSimple(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Access-Control-Allow-Origin", "*") // 跨域
+	writer.Header().Add("Content-Disposition", "attachment; filename=demo")
+	writer.Header().Set("Content-type", "text/plain") // 返回 file
+	target := request.FormValue("name")
+
+	data, err := getRelationDepends(rootPath)
+	if err != nil {
+		fmt.Println(err.Error())
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	for k := range data {
+		if strings.Compare(k, target) == 0 {
+			// 生成文件
+			buf := &bytes.Buffer{}
+			buf.WriteString("digraph G {\n")
+			simpleCombine(buf, k, data)
+			buf.WriteString("}")
+			if _, err := writer.Write(buf.Bytes()); err != nil {
+				fmt.Println(err.Error())
+				writer.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			break
+		}
 	}
 	writer.WriteHeader(http.StatusOK)
 }
@@ -240,9 +302,15 @@ func simpleCombine(buf *bytes.Buffer, rootK string, source map[string][]string) 
 		}
 	}
 	for k := range label {
+		if strings.HasPrefix(k, rootNodeName) {
+			continue
+		}
 		buf.WriteString(k)
 	}
 	for i := range relationSlice {
+		if strings.HasPrefix(relationSlice[i], rootNodeName) {
+			continue
+		}
 		buf.WriteString(relationSlice[i])
 	}
 }
@@ -267,6 +335,8 @@ func filterDepend(roots []*node) []*node {
 			} else {
 				if _, exist := unique[v.name]; exist {
 					continue
+				} else {
+					unique[v.name] = struct{}{}
 				}
 				next = append(next, v)
 			}
@@ -293,14 +363,14 @@ func draw(nodes []*node, relation map[string]struct{}, labels map[string]struct{
 	for i := range nodes {
 		name, label := deal(nodes[i].name)
 		if strings.Compare(name, label) != 0 {
-			labels[fmt.Sprintf(`%s[label="%s"]`, name, label)] = struct{}{}
+			labels[fmt.Sprintf("%s[label=\"%s\"]\n", name, label)] = struct{}{}
 		}
 		for _, v := range nodes[i].child {
 			n1, l1 := deal(v.name)
 			if strings.Compare(n1, l1) != 0 {
-				labels[fmt.Sprintf(`%s[label="%s"]`, n1, l1)] = struct{}{}
+				labels[fmt.Sprintf("%s[label=\"%s\"]\n", n1, l1)] = struct{}{}
 			}
-			str := fmt.Sprintf("%s -> %s\n", nodes[i].name, v.name)
+			str := fmt.Sprintf("%s -> %s\n", name, n1)
 			if _, exist := relation[str]; exist {
 				continue
 			}
@@ -316,7 +386,8 @@ func draw(nodes []*node, relation map[string]struct{}, labels map[string]struct{
 func deal(name string) (string, string) {
 	label := name
 	if strings.Contains(name, "/") {
-		name = strings.Replace(name, "/", "__", -1)
+		name = strings.Replace(name, "/", "___", -1)
+		name = strings.Replace(name, "-", "__", -1)
 	}
 	return name, label
 }
@@ -325,6 +396,7 @@ func getDepend(fathers []*node, source map[string][]string, nodePool map[string]
 	if len(fathers) == 0 {
 		return nil
 	}
+	var unique = make(map[string]struct{})
 	var next []*node
 	for i := range fathers {
 		father, children := fathers[i], source[fathers[i].name]
@@ -345,8 +417,14 @@ func getDepend(fathers []*node, source map[string][]string, nodePool map[string]
 			// 建立关系
 			child.father[father.name] = father
 			father.child[child.name] = child
-			if child.name == "startup" {
+			//if child.name == "startup" {
+			//	continue
+			//}
+			// 去重
+			if _, exist := unique[child.name]; exist {
 				continue
+			} else {
+				unique[child.name] = struct{}{}
 			}
 			next = append(next, child)
 		}
@@ -355,14 +433,28 @@ func getDepend(fathers []*node, source map[string][]string, nodePool map[string]
 }
 
 func canArrive(father string, child *node) bool {
-	if child.name == father || child == nil {
+	if child.name == father {
 		return true
 	}
-	for _, v := range child.child {
-		if canArrive(father, v) {
+	var next = child.child
+	for len(next) > 0 {
+		if _, exist := next[father]; exist {
 			return true
+		} else {
+			nextMap := make(map[string]*node)
+			for _, v := range next {
+				for kk, vv := range v.child {
+					nextMap[kk] = vv
+				}
+			}
+			next = nextMap
 		}
 	}
+	//for _, v := range child.child {
+	//	if canArrive(father, v) {
+	//		return true
+	//	}
+	//}
 	return false
 }
 
@@ -395,9 +487,9 @@ func combineChild(buf *bytes.Buffer, father string, child []string, relation map
 			buf.WriteString(str)
 		}
 		relation[str] = struct{}{}
-		if child[i] == "startup" {
-			continue
-		}
+		//if child[i] == "startup" {
+		//	continue
+		//}
 		next = append(next, child[i])
 	}
 	return next
@@ -482,4 +574,83 @@ func readModule(path string) ([]string, error) {
 	return res, nil
 }
 
-//
+// ***********************
+// 所有层面的结构
+// ***********************
+func getRelationDepends(path string) (map[string][]string, error) {
+	// 遍历cam项目，拉取所有的包和依赖
+	files, err := ioutil.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	depends := make(map[string][]string)
+	for i := range files {
+		if !files[i].IsDir() {
+			continue
+		}
+		dep, err := readRelationModule(path+files[i].Name(), files[i].Name())
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range dep {
+			if _, exist := depends[k]; exist {
+				depends[k] = append(depends[k], v...)
+			} else {
+				depends[k] = v
+			}
+		}
+	}
+
+	return depends, nil
+}
+
+func readRelationModule(path, pkg string) (map[string][]string, error) {
+	files, err := ioutil.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	allDepends := make(map[string][]string) // 该路径下所有依赖关系
+	var depends []string                    // 当前包的依赖关系
+	for i := range files {
+		fileName := path + "/" + files[i].Name()
+		if files[i].IsDir() {
+			deps, err := readRelationModule(fileName, pkg+"/"+files[i].Name())
+			if err != nil {
+				return nil, err
+			}
+			for k, v := range deps {
+				allDepends[k] = v
+			}
+		} else {
+			data, err := ioutil.ReadFile(fileName)
+			if err != nil {
+				return nil, err
+			}
+			lines := strings.Split(string(data), "\n")
+			for n := range lines {
+				if strings.HasPrefix(lines[n], ")") || strings.HasPrefix(lines[n], "func") {
+					break
+				}
+				line := reg.FindString(lines[n])
+				if len(line) > 0 {
+					line = strings.Split(line, "cam/back/")[1]
+					line = strings.Trim(line, `"`)
+					depends = append(depends, line)
+				}
+			}
+		}
+	}
+	// 去重
+	depMap := make(map[string]struct{})
+	for i := range depends {
+		depMap[depends[i]] = struct{}{} // 取全包含的结构，考虑需要替换的敏感字符
+	}
+	res := make([]string, 0, len(depMap))
+	for k := range depMap {
+		res = append(res, k)
+	}
+	// 按照名字排序
+	sort.Sort(Depends(res))
+	allDepends[pkg] = res
+	return allDepends, nil
+}
